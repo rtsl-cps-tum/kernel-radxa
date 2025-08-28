@@ -830,6 +830,7 @@
 #define MAIR_ATTRIDX(attr, idx)		((attr) << ((idx) * 8))
 
 /* id_aa64pfr0 */
+#define ID_AA64PFR0_MPAM_SHIFT		40
 #define ID_AA64PFR0_EL1_ELx_64BIT_ONLY		0x1
 #define ID_AA64PFR0_EL1_ELx_32BIT_64BIT		0x2
 

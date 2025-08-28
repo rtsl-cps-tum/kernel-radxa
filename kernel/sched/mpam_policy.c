@@ -187,7 +187,8 @@ static struct inode *mpam_fs_create_inode(struct super_block *sb, int mode)
 	if (ret) {
 		ret->i_ino = get_next_ino();
 		ret->i_mode = mode;
-		ret->i_atime = ret->i_mtime = ret->i_ctime = current_time(ret);
+		ret->i_atime = ret->i_mtime = current_time(ret);
+		inode_set_ctime_current(ret);
 	}
 	return ret;
 }

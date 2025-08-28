@@ -52,6 +52,6 @@ config MPAM_ARCH
 
 config MPAM_POLICY
 	tristate "MPAM policy module"
-	depends on ANDROID_MPAM_ARCH
+	depends on MPAM_ARCH
 
 endmenu

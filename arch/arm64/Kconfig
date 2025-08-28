@@ -2141,6 +2141,12 @@ config ARM64_DEBUG_PRIORITY_MASKING
 	  If unsure, say N
 endif # ARM64_PSEUDO_NMI
 
+config ARM64_MPAM
+	bool "Support for ARM MPAM"
+	default y
+	help
+		Adds support for ARM MPAM features
+		
 config RELOCATABLE
 	bool "Build a relocatable kernel image" if EXPERT
 	select ARCH_HAS_RELR
