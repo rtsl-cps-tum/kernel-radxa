@@ -339,7 +339,7 @@
 	msc0 {
 		compatible = "arm,mpam-msc";
 		reg = <0x0 0xf010000 0x0 0x2000>;
-		status = "disabled";
+		status = "okay";
 	};
 
 	memory@80000000 {

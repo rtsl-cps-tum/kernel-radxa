@@ -199,6 +199,7 @@
 	msr	spsr_el2, x0
 .endm
 
+#define CONFIG_ARM64_MPAM
 .macro __init_el2_mpam
 #ifdef CONFIG_ARM64_MPAM
 	/* Memory Partioning And Monitoring: disable EL2 traps */
