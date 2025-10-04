@@ -52,12 +52,14 @@ struct mpam_msc {
 	unsigned int cpbm_nbits;
 	unsigned int cmax_nbits;
 	unsigned int cmax_shift;
+	unsigned int mbw_prop_nbits;
 
 	int has_ris;
 	union {
 		struct {
 			bool has_cpor;
 			bool has_ccap;
+			bool has_mbw;
 		};
 		u8 part_feats;
 	};
@@ -168,6 +170,37 @@ static void mpam_msc_set_cpbm(struct mpam_msc *msc,
 	}
 }
 
+/**
+ * @apk
+ * Set the MBW Proportional register for stride based memory
+ * bandwidth partitioning 
+*/
+static void mpam_msc_set_mbw_prop(	struct mpam_msc *msc, 
+									unsigned int id,
+									const unsigned long *bitmap)
+{
+	void __iomem *addr = msc->base + MPAMCFG_MBW_PROP_n;
+	unsigned int bit = 0, n = 0;
+	u32 acc = 0;
+
+	lockdep_assert_held(&msc->lock);
+
+	mpam_msc_sel_partid(msc, id);
+
+	/* Keep the same access structure as cpbm*/
+	while (n++ < BITS_TO_U32(msc->mbw_prop_nbits)) {
+		for_each_set_bit(bit, bitmap, min_t(unsigned int, (n * BITS_PER_TYPE(u32)), msc->mbw_prop_nbits))
+			acc |= 1 << bit % BITS_PER_TYPE(u32);
+		if (test_bit(MPAMCFG_MBW_PROP_EN, &bitmap[n - 1]))
+			acc |= BIT(MPAMCFG_MBW_PROP_EN); /* Enable bit, needs to be set for valid configs*/
+		writel_relaxed(acc, addr);
+		pr_debug("MBW_PROP: 0x%x @%px\n", acc, addr);
+		addr += sizeof(acc);
+		bit = n * BITS_PER_TYPE(u32);
+		acc = 0;
+	}
+}
+
 static void mpam_msc_get_cpbm(struct mpam_msc *msc,
 			      unsigned int id,
 			      unsigned long *bitmap)
@@ -187,6 +220,33 @@ static void mpam_msc_get_cpbm(struct mpam_msc *msc,
 		for_each_set_bit(bit, &tmp, min(regsize, msc->cpbm_nbits - (n * regsize)))
 			bitmap_set(bitmap, bit + (n * regsize), 1);
 
+		addr += regsize;
+	}
+}
+
+/**
+ * @apk
+ * Get value from MBW Proprtional Partition register
+ */
+static void mpam_msc_get_mbw_prop(	struct mpam_msc *msc,
+									unsigned int id,
+									unsigned long *bitmap)
+{
+	void __iomem *addr = msc->base + MPAMCFG_MBW_PROP_n;
+	size_t regsize = BITS_PER_TYPE(u32);
+	unsigned int bit;
+	int n;
+
+	lockdep_assert_held(&msc->lock);
+
+	mpam_msc_sel_partid(msc, id);
+
+	for (n = 0; (n * regsize) < msc->mbw_prop_nbits; n++) {
+		unsigned long tmp = readl_relaxed(addr);
+
+		for_each_set_bit(bit, &tmp, regsize)
+			bitmap_set(bitmap, bit + (n * regsize), 1);
+		
 		addr += regsize;
 	}
 }
@@ -309,6 +369,31 @@ static ssize_t mpam_msc_cpbm_show(struct kobject *kobj, struct kobj_attribute *a
 	return size;
 }
 
+/**
+ * @apk
+ */
+static ssize_t mpam_msc_mbw_prop_show(	struct kobject *kobj, struct kobj_attribute *attr,
+										char *buf)
+{
+	struct msc_part_kobj *mpk = container_of(kobj, struct msc_part_kobj, kobj);
+	unsigned long *bitmap;
+	unsigned long flags;
+	size_t size;
+
+	bitmap = bitmap_zalloc(BITS_PER_TYPE(u32), GFP_KERNEL); // We need the enable bit too at bit 31
+	if (!bitmap)
+		return -ENOMEM;
+	
+	spin_lock_irqsave(&mpk->msc->lock, flags);
+	mpam_msc_get_mbw_prop(mpk->msc, mpk->partid, bitmap);
+	spin_unlock_irqrestore(&mpk->msc->lock, flags);
+
+	size = bitmap_print_to_pagebuf(true, buf, bitmap, BITS_PER_TYPE(u32));
+
+	bitmap_free(bitmap);
+	return size;
+}
+
 static ssize_t mpam_msc_cpbm_store(struct kobject *kobj, struct kobj_attribute *attr,
 				    const char *buf, size_t size)
 {
@@ -331,6 +416,34 @@ static ssize_t mpam_msc_cpbm_store(struct kobject *kobj, struct kobj_attribute *
 out_free:
 	bitmap_free(bitmap);
 	return ret ?: size;
+}
+
+/**
+ * @apk
+ */
+static ssize_t mpam_msc_mbw_prop_store(	struct kobject *kobj, struct kobj_attribute *attr,
+										const char *buf, size_t size)
+{
+	struct msc_part_kobj *mpk = container_of(kobj, struct msc_part_kobj, kobj);
+	unsigned long *bitmap;
+	unsigned long flags;
+	int ret;
+
+	bitmap = bitmap_zalloc(BITS_PER_TYPE(u32), GFP_KERNEL);
+	if (!bitmap)
+		return -ENOMEM;
+	
+	ret = bitmap_parselist(buf, bitmap, BITS_PER_TYPE(u32)); /*Enable Bit is bit 31*/
+	if (ret)
+		goto out_free;
+	
+	spin_lock_irqsave(&mpk->msc->lock, flags);
+	mpam_msc_set_mbw_prop(mpk->msc, mpk->partid, bitmap);
+	spin_unlock_irqrestore(&mpk->msc->lock, flags);
+
+out_free:
+	bitmap_free(bitmap);
+	return ret ? : size;
 }
 
 static ssize_t mpam_msc_cmax_show(struct kobject *kobj, struct kobj_attribute *attr,
@@ -371,10 +484,16 @@ static struct kobj_attribute mpam_msc_cpbm_attr =
 
 static struct kobj_attribute mpam_msc_cmax_attr =
 	__ATTR(cmax, 0644, mpam_msc_cmax_show, mpam_msc_cmax_store);
+/**
+ * @apk
+ */
+static struct kobj_attribute mpam_msc_mbw_prop_attr =
+	__ATTR(mbw_prop, 0644, mpam_msc_mbw_prop_show, mpam_msc_mbw_prop_store);
 
 static struct attribute *mpam_msc_ctrl_attrs[] = {
 	&mpam_msc_cpbm_attr.attr,
 	&mpam_msc_cmax_attr.attr,
+	&mpam_msc_mbw_prop_attr.attr,
 	NULL,
 };
 
@@ -385,6 +504,9 @@ static umode_t mpam_msc_ctrl_attr_visible(struct kobject *kobj,
 	struct msc_part_kobj *mpk;
 
 	mpk = container_of(kobj, struct msc_part_kobj, kobj);
+
+	if (attr == &mpam_msc_mbw_prop_attr.attr && mpk->msc->has_mbw)
+		goto visible;
 
 	if (attr == &mpam_msc_cpbm_attr.attr &&
 	    mpk->msc->has_cpor)
@@ -422,14 +544,31 @@ static ssize_t mpam_msc_cmax_nbits_show(struct kobject *kobj, struct kobj_attrib
 	return sprintf(buf, "%u\n", msc->cmax_nbits);
 }
 
+/**
+ * @apk
+ */
+static ssize_t mpam_msc_mbw_prop_nbits_show(struct kobject *kobj, struct kobj_attribute *attr,
+							char *buf)
+{
+	struct mpam_msc *msc = container_of(kobj, struct mpam_msc, ko_root);
+
+	return sprintf(buf, "%u\n", msc->mbw_prop_nbits);
+}
+
 static struct kobj_attribute mpam_msc_cpbm_nbits_attr =
 	__ATTR(cpbm_nbits, 0444, mpam_msc_cpbm_nbits_show, NULL);
 static struct kobj_attribute mpam_msc_cmax_nbits_attr =
 	__ATTR(cmax_nbits, 0444, mpam_msc_cmax_nbits_show, NULL);
+/**
+ * @apk
+ */
+static struct kobj_attribute mpam_msc_mbw_prop_nbits_attr =
+	__ATTR(mbw_prop_nbits, 0444, mpam_msc_mbw_prop_nbits_show, NULL);
 
 static struct attribute *mpam_msc_info_attrs[] = {
 	&mpam_msc_cpbm_nbits_attr.attr,
 	&mpam_msc_cmax_nbits_attr.attr,
+	&mpam_msc_mbw_prop_nbits_attr.attr,
 	NULL,
 };
 
@@ -439,6 +578,10 @@ static umode_t mpam_msc_info_attr_visible(struct kobject *kobj,
 {
 	struct mpam_msc *msc = container_of(kobj, struct mpam_msc, ko_root);
 
+	if (attr == &mpam_msc_mbw_prop_nbits_attr.attr &&
+	    msc->has_mbw)
+		goto visible;
+		
 	if (attr == &mpam_msc_cpbm_nbits_attr.attr &&
 	    msc->has_cpor)
 		goto visible;
@@ -467,8 +610,8 @@ static struct kobj_type mpam_kobj_ktype = {
  *   mpam/
  *     cpbm_nbits
  *     partitions/
- *       0/cpbm
- *       1/cpbm
+ *       0/cpbm 0/mbw_prop
+ *       1/cpbm 1/mbw_prop
  *       ...
  */
 static int mpam_msc_create_sysfs(struct mpam_msc *msc)
@@ -582,7 +725,8 @@ static int mpam_msc_initialize(struct mpam_msc *msc)
 
 	msc->has_cpor = FIELD_GET(MPAMF_IDR_HAS_CPOR_PART, reg);
 	msc->has_ccap = FIELD_GET(MPAMF_IDR_HAS_CCAP_PART, reg);
-	pr_err("%s %d msc->has_cpor = 0x%x msc->has_ccap = 0x%x msc->part_feats = 0x%x\n", __func__, __LINE__, msc->has_cpor, msc->has_ccap, msc->part_feats);
+	msc->has_mbw = FIELD_GET(MPAMF_IDR_HAS_MBW_PART, reg);
+	pr_err("%s %d msc->has_cpor = 0x%x msc->has_ccap = 0x%x msc->part_feats = 0x%x msc->has_mbw = 0x%x\n", __func__, __LINE__, msc->has_cpor, msc->has_ccap, msc->part_feats, msc->has_mbw);
 	/* Detect more features here */
 
 	if (!msc->part_feats) {
@@ -617,6 +761,10 @@ static int mpam_msc_initialize(struct mpam_msc *msc)
 	reg = readl_relaxed(msc->base + MPAMF_CCAP_IDR);
 	msc->cmax_nbits = FIELD_GET(MPAMF_CCAP_IDR_CMAX_WD, reg);
 	mpam_msc_cmax_shift_set(msc);
+
+	reg = readl_relaxed(msc->base + MPAMF_MBW_IDR);
+	msc->mbw_prop_nbits = FIELD_GET(MPAMF_MBW_IDR_BWA_WD, reg);
+	pr_debug("%d MBW proportional strides supported\n", msc->mbw_prop_nbits);
 
 	bitmap = bitmap_alloc(mpam_partid_count, GFP_KERNEL);
 	if (!bitmap)
